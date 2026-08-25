@@ -1,0 +1,92 @@
+diff --git a/cpp/cmake_modules/FindPython3Alt.cmake b/cpp/cmake_modules/FindPython3Alt.cmake
+index a057be8..b377da6 100644
+--- a/cpp/cmake_modules/FindPython3Alt.cmake
++++ b/cpp/cmake_modules/FindPython3Alt.cmake
+@@ -47,6 +47,19 @@ if(CMAKE_VERSION VERSION_LESS 3.18.0)
+   # available.
+   find_package(Python3 ${Python3Alt_FIND_PACKAGE_OPTIONS} COMPONENTS Interpreter
+                                                                      Development NumPy)
++elseif(CMAKE_SYSTEM_NAME STREQUAL "OS390")
++  # Development.Module deliberately does not link libpython: on ELF and Mach-O
++  # an extension leaves the Python C API undefined for the interpreter to supply
++  # at dlopen time. z/OS binds DLLs eagerly, so every symbol must resolve when
++  # the module links and an extension that does not link the Python library
++  # fails with a long list of
++  #
++  #   IEW2456E SYMBOL PyGILState_Ensure UNRESOLVED. ...
++  #
++  # The full Development component provides Python3::Python, carrying the
++  # interpreter side deck.
++  find_package(Python3 ${Python3Alt_FIND_PACKAGE_OPTIONS} COMPONENTS Interpreter
++               Development NumPy)
+ else()
+   find_package(Python3 ${Python3Alt_FIND_PACKAGE_OPTIONS}
+                COMPONENTS Interpreter Development.Module NumPy)
+diff --git a/python/CMakeLists.txt b/python/CMakeLists.txt
+index 3024945..2bbac2c 100644
+--- a/python/CMakeLists.txt
++++ b/python/CMakeLists.txt
+@@ -527,6 +527,12 @@ else()
+ endif()
+ target_link_libraries(arrow_python PUBLIC Python3::NumPy)
+ target_compile_definitions(arrow_python PRIVATE ARROW_PYTHON_EXPORTING)
++# See FindPython3Alt.cmake: on z/OS every symbol must resolve at link time, so
++# the Python library belongs on the link line. PUBLIC, so the Cython extension
++# modules inherit it through arrow_python rather than each repeating it.
++if(CMAKE_SYSTEM_NAME STREQUAL "OS390")
++  target_link_libraries(arrow_python PUBLIC Python3::Python)
++endif()
+ if(CMAKE_CONFIGURATION_TYPES)
+   target_compile_definitions(arrow_python PRIVATE PYARROW_BUILD_TYPE="$<CONFIG>")
+ endif()
+@@ -537,6 +543,30 @@ install(TARGETS arrow_python
+         LIBRARY DESTINATION .
+         RUNTIME DESTINATION .)
+ 
++# z/OS: install the DLL itself, which the rule above does not cover.
++#
++# A SHARED target here produces two artifacts, the DLL (libarrow_python.so) and
++# a side deck (libarrow_python.x) that consumers link against. CMake maps both
++# the ARCHIVE and the LIBRARY/RUNTIME destinations to the side deck: the
++# generated cmake_install.cmake carries two
++#
++#   file(INSTALL ... TYPE STATIC_LIBRARY ... "libarrow_python.x")
++#
++# entries and none for the .so. The wheel then ships a side deck describing a
++# library it does not contain, installs cleanly, and fails only at import with
++#
++#   CEE3501S The module libarrow_python.so was not found.
++#
++# $<TARGET_FILE:> is the DLL and $<TARGET_LINKER_FILE:> the side deck, the same
++# split as Windows .dll/.lib.
++if(CMAKE_SYSTEM_NAME STREQUAL "OS390")
++  # PROGRAMS rather than FILES: a DLL must be executable to load, and FILES
++  # installs 644. The extension modules, installed via install(TARGETS), come
++  # out 755; a 644 libarrow_python.so gives exactly the same symptom as the file
++  # being absent -- CEE3501S ... was not found -- at import.
++  install(PROGRAMS $<TARGET_FILE:arrow_python> DESTINATION .)
++endif()
++
+ set(PYARROW_CPP_ENCRYPTION_SRCS ${PYARROW_CPP_SOURCE_DIR}/parquet_encryption.cc)
+ if(NOT PYARROW_BUILD_PARQUET_ENCRYPTION)
+   message(STATUS "Parquet Encryption is NOT Enabled")
+diff --git a/python/pyproject.toml b/python/pyproject.toml
+index ef1a1f6..f1f4b7a 100644
+--- a/python/pyproject.toml
++++ b/python/pyproject.toml
+@@ -19,8 +19,13 @@
+ requires = [
+     "scikit-build-core",
+     "cython >= 3.1",
+-    # Needed for build-time stub docstring extraction
+-    "libcst>=1.8.6",
++    # libcst is omitted on z/OS. It is a Rust extension with no z/OS wheel, and
++    # building it from source needs a Rust toolchain this platform does not
++    # have, so the requirement is unsatisfiable at any version. It is only used
++    # by scripts/update_stub_docstrings.py, which runs when
++    # PYARROW_REQUIRE_STUB_DOCSTRINGS is on; that defaults to off, so nothing in
++    # this build imports it. Left in place, build isolation tries to install it
++    # and the build fails before compiling anything.
+     "numpy>=1.25",
+     "setuptools_scm[toml]>=8",
+ ]

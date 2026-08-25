@@ -1,0 +1,159 @@
+# bump: pyarrow-version /PYARROW_VERSION="(.*)"/ https://github.com/apache/arrow.git|semver:*
+PYARROW_VERSION="25.0.1"
+
+###
+### pyarrow, the Python bindings for Apache Arrow.
+###
+### This is a separate port from arrowport, not a stage of it. pyarrow's
+### CMakeLists does find_package(Arrow REQUIRED), so the C++ library has to be
+### installed before this builds at all. Arrow C++ is also interpreter-
+### independent while pyarrow produces a wheel per ABI, so folding them together
+### would rebuild a very large C++ project once per interpreter for nothing.
+###
+### The source is the Arrow repository, and the build happens in its python/
+### subdirectory. The whole tree has to be present: python/cmake_modules is a
+### symlink to ../cpp/cmake_modules, and python/LICENSE.txt and
+### python/NOTICE.txt are symlinks to the repository root. Building from a copy
+### of python/ alone leaves those dangling, which surfaces first as
+###
+###   Every pattern in "project.license-files" must match at least one file:
+###   'LICENSE.txt' did not match any
+###
+### and then, once that is worked around, as CMake failing on include(BuildUtils).
+###
+
+export ZOPEN_PROJECT_NAME="pyarrow"
+export ZOPEN_BUILD_LINE="STABLE"
+export ZOPEN_CATEGORIES="development library"
+
+export ZOPEN_STABLE_URL="https://github.com/apache/arrow.git"
+export ZOPEN_STABLE_TAG="apache-arrow-${PYARROW_VERSION}"
+export ZOPEN_STABLE_DEPS="zoslib make cmake check_python arrow"
+
+export ZOPEN_DEV_URL="https://github.com/apache/arrow.git"
+export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
+
+# libarrow.so and libarrow_compute.so must be present and on LIBPATH at import.
+export ZOPEN_RUNTIME_DEPS="check_python arrow"
+export ZOPEN_COMP="CLANG"
+
+export ZOPEN_BUILD_SYSTEM="Python"
+
+# Build in python/, keeping the rest of the repository in place for the symlinks
+# described above. ZOPEN_SRC_DIR is documented under "Restricted Usage (tclport)"
+# but it is the only mechanism for a project whose packaging lives in a
+# subdirectory, and it does exactly that: cd there for bootstrap, configure,
+# build, check and install.
+export ZOPEN_SRC_DIR="python"
+
+# Do not link zopen's zoslib environment hook into the extension modules.
+#
+# zopen normally appends .zoslib_hooks/zoslib_env_hook.o to every link so zoslib
+# can set environment variables before main runs. That is right for a program
+# and wrong for a DLL: Python dlopen's these modules, the hook runs during load,
+# and the interpreter dies with
+#
+#   CEE3250C The system or user abend U4093 R=000000CC was issued.
+#            From entry point zoslib_env_hook ...
+#
+# and no Python traceback. arrowport sets this for the same reason.
+export ZOPEN_SKIP_ZOSLIB_ENV_HOOK=1
+
+# CMake settings for the scikit-build-core backend.
+#
+# ARROW_CPU_FLAG: pyarrow includes Arrow's SetupCxxFlags.cmake, which maps
+# CMAKE_SYSTEM_PROCESSOR to an Arrow CPU name. Here that is the machine type
+# ("8561"), which matches nothing, and the configure stops at
+# "Unknown system processor". Arrow has an s390x path -- IBM contributed it --
+# so naming it directly is enough. arrowport does the same.
+#
+# PYARROW_BUNDLE_ARROW_CPP stays off: Arrow C++ comes from arrowport and is
+# resolved through LIBPATH, so the wheel does not carry a second copy.
+export PYARROW_BUNDLE_ARROW_CPP=OFF
+
+# Pin the version setuptools_scm reports.
+#
+# pyarrow takes its version from git through setuptools_scm. zopen checks out
+# the release tag and then applies patches, leaving the tree dirty, so scm
+# describes it as a development version *after* the tag and produces
+#
+#   pyarrow-25.0.2.dev0+ga2f2388.d20260825-cp312-cp312-os390_29_00_8561.whl
+#
+# which is both wrong -- this is 25.0.1, not a 25.0.2 pre-release -- and
+# unstable, since the embedded commit hash and date change on every rebuild.
+export SETUPTOOLS_SCM_PRETEND_VERSION="${PYARROW_VERSION}"
+
+zopen_pre_build() {
+  # Set here rather than at the top of the file because ARROW_HOME comes from
+  # arrowport's environment, which is in place by the time the build runs.
+  #
+  # CMAKE_PREFIX_PATH is what lets pyarrow's find_package(Arrow REQUIRED)
+  # locate ArrowConfig.cmake; without it the configure stops at
+  #   Could not find a package configuration file provided by "Arrow"
+  if [ -z "${ARROW_HOME}" ]; then
+    printSoftError "ARROW_HOME is not set; is arrowport installed?"
+    return 1
+  fi
+  export SKBUILD_CMAKE_DEFINE="ARROW_CPU_FLAG=s390x;CMAKE_PREFIX_PATH=${ARROW_HOME}"
+  printInfo "- Arrow C++ from ${ARROW_HOME}"
+  return 0
+}
+
+zopen_post_install() {
+  printHeader "Checking the installed pyarrow"
+  _pa_lib="${ZOPEN_INSTALL_DIR}/lib/python"
+  if [ ! -d "${_pa_lib}/pyarrow" ]; then
+    printSoftError "pyarrow is not in the install tree"
+    return 1
+  fi
+
+  # The DLL must be beside the extension modules. CMake installs only the side
+  # deck for a SHARED target on this platform, so patches/ adds an explicit
+  # install(FILES $<TARGET_FILE:arrow_python>) -- without it the wheel ships
+  # libarrow_python.x describing a library it does not contain, and the failure
+  # only appears at import as
+  #   CEE3501S The module libarrow_python.so was not found.
+  if [ ! -f "${_pa_lib}/pyarrow/libarrow_python.so" ]; then
+    printSoftError "FAIL: libarrow_python.so is missing from the package"
+    printSoftError "      the wheel carries only the side deck; import will fail"
+    return 1
+  fi
+  printInfo "- libarrow_python.so is present"
+
+  _pa_n=$(ls "${_pa_lib}/pyarrow"/*.so 2>/dev/null | wc -l | tr -d ' ')
+  printInfo "- ${_pa_n} shared objects in the package"
+  return 0
+}
+
+zopen_check_results() {
+cat <<ZZ
+actualFailures:0
+totalTests:1
+expectedFailures:0
+expectedTotalTests:1
+ZZ
+}
+
+# pyarrow's own test suite is not run yet. It needs pytest plus hypothesis and
+# pandas; whether those are available here is untested, and a check that cannot
+# run is worse than one honestly marked as not running. What is verified is that
+# the package imports and that each enabled module works -- see the README.
+export ZOPEN_CHECK="skip"
+
+# LIBPATH, not rpath.
+#
+# The extension modules depend on libarrow_python.so, which sits beside them,
+# and on libarrow.so from arrowport. z/OS resolves DLLs through LIBPATH only:
+# there is no $ORIGIN, and the linker rejects -rpath outright ("IEW5003 -r is
+# not a valid option"). pyarrow's own CMakeLists sets CMAKE_INSTALL_RPATH
+# "\$ORIGIN" for exactly this purpose on other platforms, and it is inert here,
+# so the package directory has to be named explicitly.
+zopen_append_to_env() {
+cat <<ZZ
+export LIBPATH="\$PWD/lib/python/pyarrow:\$LIBPATH"
+ZZ
+}
+
+zopen_get_version() {
+  echo "${PYARROW_VERSION}"
+}

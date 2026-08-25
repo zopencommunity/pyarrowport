@@ -1,0 +1,13 @@
+log/
+log.DEV/
+log.STABLE/
+build/
+install/
+.zoslib_hooks/
+.pip-cache/
+
+# Source directory created by zopen-build
+arrow/
+arrow-*/
+dist/
+wheels/
