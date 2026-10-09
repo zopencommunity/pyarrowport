@@ -1,5 +1,5 @@
 # bump: pyarrow-version /PYARROW_VERSION="(.*)"/ https://github.com/apache/arrow.git|semver:*
-PYARROW_VERSION="25.0.1"
+PYARROW_VERSION="26.0.0"
 
 ###
 ### pyarrow, the Python bindings for Apache Arrow.
